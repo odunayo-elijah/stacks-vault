@@ -94,3 +94,95 @@
     total-yield-earned: uint,
   }
 )
+
+;; UTILITY FUNCTIONS
+
+(define-private (validate-metadata-uri (uri (string-ascii 256)))
+  (and
+    (> (len uri) u0)
+    (<= (len uri) u256)
+  )
+)
+
+(define-private (is-valid-recipient (recipient principal))
+  (and
+    (not (is-eq recipient (as-contract tx-sender)))
+    (not (is-eq recipient CONTRACT-OWNER))
+  )
+)
+
+;; NEW: Token existence validation
+(define-private (token-exists (token-id uint))
+  (and
+    (> token-id u0)
+    (<= token-id (var-get total-minted))
+    (is-some (map-get? asset-registry { token-id: token-id }))
+  )
+)
+
+(define-private (safe-arithmetic-add
+    (a uint)
+    (b uint)
+  )
+  (let ((result (+ a b)))
+    (asserts! (>= result a) ERR-ARITHMETIC-OVERFLOW)
+    (ok result)
+  )
+)
+
+(define-private (calculate-collateral-requirement (base-amount uint))
+  (/ (* base-amount (var-get minimum-collateral-ratio)) u100)
+)
+
+;; CORE NFT OPERATIONS
+
+(define-public (mint-asset
+    (metadata-uri (string-ascii 256))
+    (collateral-amount uint)
+  )
+  (let (
+      (new-token-id (+ (var-get total-minted) u1))
+      (required-collateral (calculate-collateral-requirement collateral-amount))
+    )
+    (asserts! (not (var-get emergency-pause)) ERR-UNAUTHORIZED)
+    (asserts! (validate-metadata-uri metadata-uri) ERR-INVALID-TOKEN)
+    (asserts! (>= (stx-get-balance tx-sender) required-collateral)
+      ERR-INSUFFICIENT-COLLATERAL
+    )
+
+    ;; Lock collateral in protocol
+    (try! (stx-transfer? required-collateral tx-sender (as-contract tx-sender)))
+
+    ;; Register new asset
+    (map-set asset-registry { token-id: new-token-id } {
+      owner: tx-sender,
+      metadata-uri: metadata-uri,
+      collateral-locked: required-collateral,
+      staking-status: false,
+      stake-block: u0,
+      fractional-supply: u0,
+      creation-block: stacks-block-height,
+    })
+
+    (var-set total-minted new-token-id)
+    (ok new-token-id)
+  )
+)
+
+(define-public (transfer-asset
+    (token-id uint)
+    (new-owner principal)
+  )
+  (let ((asset-data (unwrap! (map-get? asset-registry { token-id: token-id }) ERR-INVALID-TOKEN)))
+    ;; Input validation
+    (asserts! (token-exists token-id) ERR-INVALID-TOKEN)
+    (asserts! (is-valid-recipient new-owner) ERR-INVALID-RECIPIENT)
+    (asserts! (is-eq tx-sender (get owner asset-data)) ERR-UNAUTHORIZED)
+    (asserts! (not (get staking-status asset-data)) ERR-ALREADY-STAKED)
+
+    (map-set asset-registry { token-id: token-id }
+      (merge asset-data { owner: new-owner })
+    )
+    (ok true)
+  )
+)
