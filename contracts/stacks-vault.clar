@@ -186,3 +186,103 @@
     (ok true)
   )
 )
+
+;; MARKETPLACE FUNCTIONS
+
+(define-public (create-listing
+    (token-id uint)
+    (sale-price uint)
+  )
+  (let ((asset-data (unwrap! (map-get? asset-registry { token-id: token-id }) ERR-INVALID-TOKEN)))
+    ;; Input validation
+    (asserts! (token-exists token-id) ERR-INVALID-TOKEN)
+    (asserts! (> sale-price u0) ERR-INVALID-PRICE)
+    (asserts! (is-eq tx-sender (get owner asset-data)) ERR-UNAUTHORIZED)
+    (asserts! (not (get staking-status asset-data)) ERR-ALREADY-STAKED)
+
+    (map-set marketplace-listings { token-id: token-id } {
+      seller: tx-sender,
+      price: sale-price,
+      is-active: true,
+      listing-block: stacks-block-height,
+    })
+    (ok true)
+  )
+)
+
+(define-public (execute-purchase (token-id uint))
+  (let (
+      (listing-data (unwrap! (map-get? marketplace-listings { token-id: token-id })
+        ERR-LISTING-INACTIVE
+      ))
+      (sale-price (get price listing-data))
+      (seller (get seller listing-data))
+      (protocol-fee (/ (* sale-price (var-get protocol-fee-rate)) u10000))
+    )
+    ;; Input validation
+    (asserts! (token-exists token-id) ERR-INVALID-TOKEN)
+    (asserts! (get is-active listing-data) ERR-LISTING-INACTIVE)
+
+    ;; Execute payment transfers
+    (try! (stx-transfer? (- sale-price protocol-fee) tx-sender seller))
+    (try! (stx-transfer? protocol-fee tx-sender (as-contract tx-sender)))
+
+    ;; Transfer asset ownership
+    (try! (transfer-asset token-id tx-sender))
+
+    ;; Deactivate listing
+    (map-set marketplace-listings { token-id: token-id }
+      (merge listing-data { is-active: false })
+    )
+
+    ;; Update protocol treasury
+    (var-set protocol-treasury (+ (var-get protocol-treasury) protocol-fee))
+    (ok true)
+  )
+)
+
+;; FRACTIONAL OWNERSHIP SYSTEM
+
+(define-public (transfer-fractional-shares
+    (token-id uint)
+    (recipient principal)
+    (share-amount uint)
+  )
+  (let (
+      (sender-balance (default-to { share-balance: u0 }
+        (map-get? ownership-ledger {
+          token-id: token-id,
+          holder: tx-sender,
+        })
+      ))
+      (recipient-balance (default-to { share-balance: u0 }
+        (map-get? ownership-ledger {
+          token-id: token-id,
+          holder: recipient,
+        })
+      ))
+    )
+    ;; Input validation
+    (asserts! (token-exists token-id) ERR-INVALID-TOKEN)
+    (asserts! (is-valid-recipient recipient) ERR-INVALID-RECIPIENT)
+    (asserts! (> share-amount u0) ERR-INVALID-SHARES)
+    (asserts! (>= (get share-balance sender-balance) share-amount)
+      ERR-INVALID-SHARES
+    )
+
+    ;; Update sender's balance
+    (map-set ownership-ledger {
+      token-id: token-id,
+      holder: tx-sender,
+    } { share-balance: (- (get share-balance sender-balance) share-amount) }
+    )
+
+    ;; Update recipient's balance
+    (map-set ownership-ledger {
+      token-id: token-id,
+      holder: recipient,
+    } { share-balance: (+ (get share-balance recipient-balance) share-amount) }
+    )
+    (ok true)
+  )
+)
