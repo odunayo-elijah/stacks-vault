@@ -286,3 +286,102 @@
     (ok true)
   )
 )
+
+;; YIELD GENERATION SYSTEM
+
+(define-public (stake-for-yield (token-id uint))
+  (let ((asset-data (unwrap! (map-get? asset-registry { token-id: token-id }) ERR-INVALID-TOKEN)))
+    ;; Input validation
+    (asserts! (token-exists token-id) ERR-INVALID-TOKEN)
+    (asserts! (is-eq tx-sender (get owner asset-data)) ERR-UNAUTHORIZED)
+    (asserts! (not (get staking-status asset-data)) ERR-ALREADY-STAKED)
+
+    ;; Update asset staking status
+    (map-set asset-registry { token-id: token-id }
+      (merge asset-data {
+        staking-status: true,
+        stake-block: stacks-block-height,
+      })
+    )
+
+    ;; Initialize yield tracking
+    (map-set yield-tracker { token-id: token-id } {
+      accumulated-rewards: u0,
+      last-claim-block: stacks-block-height,
+      total-yield-earned: u0,
+    })
+
+    (var-set total-staked-count (+ (var-get total-staked-count) u1))
+    (ok true)
+  )
+)
+
+(define-public (unstake-asset (token-id uint))
+  (let ((asset-data (unwrap! (map-get? asset-registry { token-id: token-id }) ERR-INVALID-TOKEN)))
+    ;; Input validation
+    (asserts! (token-exists token-id) ERR-INVALID-TOKEN)
+    (asserts! (is-eq tx-sender (get owner asset-data)) ERR-UNAUTHORIZED)
+    (asserts! (get staking-status asset-data) ERR-NOT-STAKED)
+
+    ;; Claim final rewards before unstaking
+    (try! (claim-yield-rewards token-id))
+
+    ;; Update staking status
+    (map-set asset-registry { token-id: token-id }
+      (merge asset-data {
+        staking-status: false,
+        stake-block: u0,
+      })
+    )
+
+    (var-set total-staked-count (- (var-get total-staked-count) u1))
+    (ok true)
+  )
+)
+
+(define-private (claim-yield-rewards (token-id uint))
+  (let (
+      (reward-amount (unwrap! (calculate-pending-rewards token-id) ERR-NOT-STAKED))
+      (asset-data (unwrap! (map-get? asset-registry { token-id: token-id }) ERR-INVALID-TOKEN))
+      (yield-data (unwrap! (map-get? yield-tracker { token-id: token-id }) ERR-NOT-STAKED))
+    )
+    ;; Update yield tracking
+    (map-set yield-tracker { token-id: token-id } {
+      accumulated-rewards: u0,
+      last-claim-block: stacks-block-height,
+      total-yield-earned: (+ (get total-yield-earned yield-data) reward-amount),
+    })
+
+    ;; Distribute rewards from protocol treasury
+    (as-contract (stx-transfer? reward-amount (as-contract tx-sender) (get owner asset-data)))
+  )
+)
+
+;; READ-ONLY QUERY FUNCTIONS
+
+(define-read-only (get-asset-details (token-id uint))
+  (if (token-exists token-id)
+    (map-get? asset-registry { token-id: token-id })
+    none
+  )
+)
+
+(define-read-only (get-listing-details (token-id uint))
+  (if (token-exists token-id)
+    (map-get? marketplace-listings { token-id: token-id })
+    none
+  )
+)
+
+(define-read-only (get-fractional-balance
+    (token-id uint)
+    (holder principal)
+  )
+  (if (token-exists token-id)
+    (map-get? ownership-ledger {
+      token-id: token-id,
+      holder: holder,
+    })
+    none
+  )
+)
