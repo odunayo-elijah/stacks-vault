@@ -385,3 +385,56 @@
     none
   )
 )
+
+(define-read-only (calculate-pending-rewards (token-id uint))
+  (let (
+      (asset-data (unwrap! (map-get? asset-registry { token-id: token-id }) ERR-INVALID-TOKEN))
+      (yield-data (unwrap! (map-get? yield-tracker { token-id: token-id }) ERR-NOT-STAKED))
+      (blocks-staked (- stacks-block-height (get last-claim-block yield-data)))
+      (annual-blocks u52560) ;; Approximate Stacks blocks per year
+      (reward-rate (/ (var-get annual-yield-rate) annual-blocks))
+      (base-reward (* (get collateral-locked asset-data) reward-rate))
+      (time-reward (/ (* base-reward blocks-staked) u10000))
+    )
+    (asserts! (token-exists token-id) ERR-INVALID-TOKEN)
+    (asserts! (get staking-status asset-data) ERR-NOT-STAKED)
+    (ok (+ (get accumulated-rewards yield-data) time-reward))
+  )
+)
+
+(define-read-only (get-protocol-stats)
+  {
+    total-assets: (var-get total-minted),
+    total-staked: (var-get total-staked-count),
+    treasury-balance: (var-get protocol-treasury),
+    current-yield-rate: (var-get annual-yield-rate),
+    protocol-fee: (var-get protocol-fee-rate),
+  }
+)
+
+;; ADMIN FUNCTIONS (DAO GOVERNANCE READY)
+
+(define-public (update-protocol-fee (new-fee-rate uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (asserts! (<= new-fee-rate u1000) ERR-INVALID-PRICE) ;; Max 10% fee
+    (var-set protocol-fee-rate new-fee-rate)
+    (ok true)
+  )
+)
+
+(define-public (emergency-pause-protocol)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (var-set emergency-pause true)
+    (ok true)
+  )
+)
+
+(define-public (resume-protocol-operations)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (var-set emergency-pause false)
+    (ok true)
+  )
+)
